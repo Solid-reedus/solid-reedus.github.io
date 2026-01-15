@@ -1,10 +1,10 @@
 ---
 layout: default
-title: Home
+title: Blog
 ---
 
-# Welcome
+# Blog
 
-This is my site.
-
-[Go to the blog](/blog/)
+{% for post in site.posts %}
+- [{{ post.title }}]({{ post.url }})
+{% endfor %}
