@@ -205,13 +205,25 @@ This enables parallel entity processing with minimal changes to existing ECS cod
 
 ### Synchronization Strategy
 
-The system avoids heavy locking and relies on:
+Synchronization is one of the hardest parts of any multithreaded system. Excessive locking can destroy performance, while insufficient synchronization leads to subtle and difficult-to-debug race conditions.
 
-* Atomics for counters and state
-* Cooperative busy waiting
-* Explicit synchronization (`WaitAll()`)
+Rather than relying on traditional mutex-heavy designs, this job system uses a combination of:
 
-When workers run out of work, they assist in finishing remaining jobs rather than sleeping, reducing idle time and improving throughput.
+- **Atomic counters** to track job completion and dependencies
+- **Cooperative busy waiting** instead of blocking sleeps
+- **Explicit synchronization points** via `WaitAll()`
+
+The key idea is that workers should *help finish the frame*, not wait for it.
+
+When a worker runs out of local work, it does not immediately sleep or yield the CPU. Instead, it actively searches for remaining jobs—either from its own queue or by stealing from others. This cooperative behavior significantly reduces idle time, especially in frames with uneven workloads.
+
+Explicit synchronization is a deliberate design choice. Rather than hiding synchronization behind implicit barriers, the user must clearly define where parallel execution converges. While this places more responsibility on the programmer, it makes execution order and performance costs predictable—an important property in engine-level code.
+
+In practice, this approach trades some ease of use for:
+- Lower contention
+- Fewer context switches
+- More consistent frame times under load
+
 
 ---
 
@@ -219,22 +231,28 @@ When workers run out of work, they assist in finishing remaining jobs rather tha
 
 ### Demo & Stress Testing
 
-To evaluate real-world performance, I created a simulation with thousands to over a million entities executing mixed workloads.
+To evaluate the job system under realistic conditions, I built a **Total War–style simulation** featuring thousands to over a million entities executing mixed workloads. These workloads included movement updates, formation logic, and behavior processing—all with uneven execution times.
 
-[inser video here !!!]
-<!-- Insert demo video here -->
+This setup was intentionally chosen to stress:
+- Load balancing across worker threads
+- Dependency resolution under pressure
+- Scalability as entity count increases
 
-Observed results:
+[insert demo video here]
 
-* Stable frame times under heavy load
-* Up to **16× speedup** over synchronous execution
-* Improved efficiency as workload size increases
+During profiling, several important behaviors emerged.
 
-Profiling revealed:
+First, **frame times remained stable** as entity counts increased. While total CPU usage rose—as expected—the cost per entity decreased due to improved parallel efficiency.
 
-* Global queues caused contention → replaced with per-worker queues
-* Chunk size heavily affects data-parallel efficiency
-* Larger workloads often scale better due to reduced synchronization overhead
+Second, the system achieved **up to a 16× speedup** compared to equivalent synchronous execution. Interestingly, the largest gains appeared at higher workloads, where workers remained busy without frequently synchronizing.
+
+Profiling also directly influenced design decisions:
+- An early global job queue caused noticeable contention under stress → replaced with per-worker queues
+- Very small chunk sizes increased scheduling overhead → chunk sizes were tuned empirically
+- Larger batches improved cache locality and reduced atomic pressure
+
+These observations reinforced a recurring theme: in multithreaded systems, *more work can sometimes mean better performance*, as overheads are amortized and workers remain productive.
+
 
 ---
 
