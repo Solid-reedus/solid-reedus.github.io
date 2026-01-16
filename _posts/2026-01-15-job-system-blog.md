@@ -14,143 +14,200 @@ Over the last two decades, game engines have evolved from largely single-threade
 For this project, I set out to build a **job system** capable of handling large amounts of work efficiently, while integrating cleanly with an **Entity Component System (ECS)**. To showcase its capabilities, I built a **Total War–inspired simulation** where thousands of entities are updated in parallel.
 
 In this blog post, I will cover:
-- Why job systems are essential for modern engines
-- How ECS fits naturally into data-parallel workloads
-- The architecture and implementation of my job system
-- Performance results, trade-offs, and lessons learned
+- the perforamnce gain it can add to your engine and other big applications that use a lot of performance.
+- the synergy between job systems and ECS
+- the architecture of a job system and the bits and pieces its made up of
+- the gains and result of a job system had on my engine.
+
+<br>
 
 ---
 
 ## Context & Background
 
-
-<!-- might change it back to old "Why Is This Problem Important?"? -->
 ### Why Is This Problem Important?
 
-CPU clock speeds have largely plateaued, but the number of cores continues to increase. To fully utilize modern hardware, software must be **parallel by design**.
+Over the past decade, CPU clock speeds have largely stopped increasing, while the number of available cores on consumer hardware has steadily grown. This means that modern performance gains no longer come from faster single-threaded code, but from using **multiple cores effectively**.
 
-Games—especially simulations like RTS titles—often update thousands of entities every frame. Even with an ECS, a purely sequential update loop quickly becomes a bottleneck. To scale effectively, workloads must be split and scheduled across multiple cores.
+For engine programmers, this changes the problem entirely. Writing highly optimized sequential code is no longer enough. To take advantage of modern hardware, systems must be designed with **parallel execution in mind from the start**, rather than retrofitted later.
 
-A job system solves this by:
-- Breaking work into small, schedulable units
-- Dynamically balancing load across worker threads
-- Allowing dependencies without serializing the entire frame
+Games with simulation-heavy workloads are particularly affected. Updating large numbers of entities every frame quickly becomes a bottleneck, even when using data-oriented techniques like ECS. Movement logic, AI decisions, formation updates, and combat behavior all add up, and running them one after another does not scale.
 
-This blog is aimed at fellow students interested in:
-- Engine and tools programming  
-- Multithreading and performance  
-- ECS-based data-oriented design  
+A job system addresses this by breaking work into smaller units that can be executed concurrently. Instead of thinking in terms of “systems running one after another,” the engine can think in terms of **work that is allowed to happen at the same time**, with synchronization only where it is actually needed.
+
+This blog is written for fellow students who are interested in:
+- Engine and tools programming
+- Multithreading and performance
+- ECS-based, data-oriented design
+
+The goal is not to present a production-ready solution, but to show how these ideas come together in practice, what problems arise, and how they can be approached.
+
+
+<br>
 
 ---
 
 ## What Is a Job System?
 
-A job system is a concurrency framework that schedules small units of work (jobs) across a pool of worker threads. Instead of dedicating threads to specific systems, jobs are dynamically distributed, improving utilization and scalability.
+A job system is a concurrency framework that schedules small units of work, called *jobs*, across a pool of worker threads. Instead of assigning long-running systems to dedicated threads, work is split into smaller pieces and distributed dynamically. This allows the CPU to stay busy and scale with the number of available cores.
 
-The execution model is **cooperative**: when a worker finishes its own work, it helps complete remaining jobs rather than going idle.
+A central idea behind most job systems is that threads should only be idle when there is truly no work left to do. In my implementation, the execution model is cooperative. When a worker finishes its own jobs, it actively looks for other work to help with instead of immediately sleeping or yielding.
 
-> *A metaphor for this cooperative execution model:*  
-> ![apes together strong - cooperative threads metaphor](/media/apes_together_strong.jpg)
+> *A simple metaphor for this cooperative execution model:*  
+> ![apes together strong - threads working together metaphor](/media/apes_together_strong.jpg)
 
-While cooperation enables impressive gains, it also introduces complexity in synchronization, correctness, and debugging—topics that strongly influenced the system’s design.
+This approach can produce large performance gains, especially for workloads that can be split into many independent tasks. However, it also introduces complexity. Synchronization becomes harder, debugging gets more difficult, and careless design can easily lead to stalls or unpredictable behavior.
+
+Because of this, a major design goal of my job system was **explicitness**. Parallel work, dependencies, and synchronization points should be visible in the code, not hidden behind abstractions. This makes the system slightly more demanding to use, but much easier to reason about and debug.
+
+
+<br>
 
 ---
 
 ## What I Built
 
-The result of this project is a job system designed to handle both **many small tasks** and **large data-parallel workloads**, while remaining explicit and predictable to use.
+The result of this project is a job system designed to handle both **many small tasks** and **large data-parallel workloads**, while remaining explicit and predictable to use in an engine context.
 
 The system supports:
-- **Task parallelization** via lightweight jobs
-- **Explicit dependency management** for ordered execution
-- **Data-parallel ECS processing** using chunked views
-- **Cooperative busy waiting** to keep workers productive
+- Task parallelization through lightweight jobs
+- Explicit dependency management, avoiding hidden synchronization
+- Data-parallel ECS processing using chunked iteration
+- Cooperative busy waiting to keep workers productive
+- Work stealing to improve load balancing under uneven workloads
 
-To validate the system, I built a **Total War–style simulation** with thousands of units executing formation logic and behavior in parallel. This created a mixed workload with uneven execution times—an effective stress test for scheduling and load balancing.
+To validate the design, I built a Total War–style simulation with thousands of units executing formation logic, movement, and behavior updates in parallel. This created a deliberately mixed workload: some jobs are small and cheap, others are heavier and more expensive.
+
+This kind of workload is challenging for many schedulers and makes a good stress test. It exposes problems in load balancing, scheduling fairness, synchronization overhead, and frame-time stability. Rather than optimizing for an ideal case, the system was tested under conditions that resemble real gameplay scenarios.
+
+
+<br>
 
 ---
-
-
-
-
-
-
-
-
-## Implementation
 
 ### Architecture Overview
 
-The job system is designed to keep all CPU cores busy without requiring the programmer to manually manage threads. Work is broken into small **jobs**, which are dynamically scheduled across a fixed pool of worker threads.
+There are several common ways to approach the design of a job system. At a high level, these include:
+- Dedicated threads per system
+- Thread pools
+- Fiber-based schedulers
 
-![thread pool](/media/thread_pools.png)
-<!-- Source: https://jenkov.com/tutorials/java-concurrency/thread-pools.html -->
+For this project, I chose a **thread pool–based design**. It sits in a practical middle ground: powerful enough to demonstrate real performance gains, but not so complex that the system becomes difficult to understand or debug.
 
-Each worker thread owns its **own job queue**, reducing contention compared to a single global queue. Workers primarily consume jobs from their local queue, which keeps common-case execution fast.
+#### What Is a Thread Pool?
 
-![work stealing](/media/work_stealing_diagram.png)
-<!-- Source: https://actor-framework.readthedocs.io/en/stable/core/Scheduler.html -->
+A thread pool is a fixed collection of worker threads managed by the job system. Instead of creating and destroying threads dynamically, the system feeds work to these workers as jobs become available.
 
-When a worker runs out of work, it attempts to **steal jobs** from another worker’s queue. This balances uneven workloads and prevents CPU cores from sitting idle.
+A typical thread pool consists of:
+- Worker threads
+- A representation of jobs to execute
+- One or more queues used to distribute work
 
-An **atomic job counter** tracks outstanding work, and explicit synchronization points such as `WaitAll()` allow the user to define when parallel execution must converge. This keeps synchronization predictable and avoids hidden stalls.
+The diagram below shows a simplified visualization of a thread pool:
+
+![thread pool](/media/thread_pools.png)  
+<sup>Source: https://jenkov.com/tutorials/java-concurrency/thread-pools.html</sup>
+
+In my implementation, each worker owns a **local job queue** rather than relying on a single global queue. This design enables **work stealing**. When a worker runs out of local work, it attempts to steal jobs from another worker’s queue.
+
+Work stealing helps reduce idle time and improves performance under uneven workloads, which are common in real simulations where not all jobs take the same amount of time to execute.
+
+![work stealing](/media/work_stealing_diagram.png)  
+<sub>Source: https://actor-framework.readthedocs.io/en/stable/core/Scheduler.html</sub>
+
+To coordinate execution across workers, the system tracks outstanding work using an **atomic job counter**. Explicit synchronization points, such as `WaitAll()`, allow the user to define when parallel execution must converge back to a known state.
+
+This approach makes synchronization visible and predictable. Instead of hidden barriers or implicit waits, the programmer can clearly see where parallel execution ends, which makes both performance behavior and debugging easier to reason about.
 
 
 ---
 
+
 ### Job Representation
 
-Each job is an explicit unit of work containing:
-- A function to execute
-- A dependency counter
-- A list of dependent jobs
-- A completion flag
+At the lowest level, a job represents a **single unit of executable work** along with the metadata required to schedule and synchronize it safely.
 
-This design avoids global locks and enables efficient dependency resolution.
+In my implementation, a job consists of:
+
+```cpp
+    struct Job
+    {
+        Job(const std::function<void()>& p_func) : func(p_func) {}
+
+        std::function<void()> func;
+
+        std::atomic<int> dependencies{0};
+        std::vector<std::shared_ptr<Job>> dependents;
+
+        std::atomic<bool> finished{false};
+    };
+```
+
+
+Each job contains:
+
+- A **callable function** representing the work to execute  
+- An **atomic dependency counter** indicating how many prerequisite jobs must finish before this job becomes runnable  
+- A list of **dependent jobs** that should be notified when this job completes  
+- A **completion flag**, used for synchronization and debugging
+
+This structure keeps jobs small and self-contained. Instead of relying on a global dependency graph or centralized scheduler state, dependency resolution happens locally by decrementing counters when jobs complete.
+
+The design deliberately avoids heavy locking and global coordination. While this limits some forms of dependency expression, it keeps scheduling overhead low and makes the system easier to reason about under load.
+
 
 ---
 
 ### Job Creation and Submission
 
-Jobs are created, linked, and submitted explicitly:
+Jobs are created, linked, and submitted **explicitly** by the user. Rather than inferring execution order or attempting to automatically detect dependencies, the job system requires these relationships to be stated directly.
+
+A typical usage flow looks like this:
 
 ```cpp
-auto job1 = Engine.JobSystem().CreateJob([]() 
-{
-    DoWorkA();
-});
+    auto job1 = Engine.JobSystem().CreateJob([]() 
+    {
+        DoWorkA();
+    });
 
-auto job2 = Engine.JobSystem().CreateJob([]() 
-{
-    DoWorkB();
-});
+    auto job2 = Engine.JobSystem().CreateJob([]() 
+    {
+        DoWorkB();
+    });
 
-Engine.JobSystem().AddDependency(job1, job2);
+    Engine.JobSystem().AddDependency(job1, job2);
 
-Engine.JobSystem().Submit(job1);
-Engine.JobSystem().Submit(job2);
-Engine.JobSystem().WaitAll();
+    Engine.JobSystem().Submit(job1);
+    Engine.JobSystem().Submit(job2);
+    Engine.JobSystem().WaitAll();
 ```
+
+In this setup, one job is declared as depending on the completion of another. The dependency is enforced through the job’s dependency counter, ensuring the correct execution order without blocking worker threads unnecessarily.
 
 This approach is intentionally explicit:
 
-* The system does not infer dependencies
-* Synchronization points are clearly defined
-* Execution order is predictable
+- The job system does **not** infer dependencies
+- Synchronization points such as `WaitAll()` are clearly visible
+- Execution order and synchronization costs are predictable
 
-This mirrors real-world engine APIs and avoids hidden stalls.
+While this places more responsibility on the programmer, it avoids hidden synchronization and implicit barriers. For an engine-level tool, this explicitness helps make performance behavior easier to reason about and debug.
+
 
 ---
 
 ### ECS Integration with `ParallelFor`
 
-#### A Short ECS Refresher
+#### ECS in a Nutshell
 
-An Entity Component System organizes data by components rather than object hierarchies. Entities are identifiers, components are data, and systems operate over views of components. This layout is ideal for **data-parallel processing**.
+An Entity Component System (ECS) separates **data** from **behavior**. Entities are identifiers, components are plain data, and systems operate over views of components. This layout leads to contiguous memory access and predictable iteration patterns, making ECS well suited for data-parallel execution.
+
+In practice, ECS already organizes data in a way that a job system can take advantage of.
 
 ---
 
-To integrate ECS workloads, I implemented a `ParallelFor` abstraction that splits an ECS view into jobs:
+To integrate ECS workloads into the job system, I implemented a `ParallelFor` abstraction. This function takes an ECS view, splits it into chunks, and schedules each chunk as a separate job.
+
+At a high level, `ParallelFor` performs the following steps:
 
 ```cpp
 template <typename View, typename Func>
@@ -168,9 +225,12 @@ void ParallelFor(View& view, Func&& func)
         int begin = i;
         int end = std::min(i + chunkSize, total);
 
-        auto job = CreateJob([&, begin, end]() {
+        auto job = CreateJob([&, begin, end]() 
+        {
             for (int j = begin; j < end; ++j)
+            {
                 func(view, entities[j]);
+            }
         });
 
         Submit(job);
@@ -180,8 +240,9 @@ void ParallelFor(View& view, Func&& func)
 }
 ```
 
-**Before (synchronous ECS):**
+From the user’s perspective, the change is minimal.
 
+**Before:**  
 ```cpp
 for (auto [entity, foo] : fooView.each())
 {
@@ -189,8 +250,7 @@ for (auto [entity, foo] : fooView.each())
 }
 ```
 
-**After (parallel ECS):**
-
+**After:**  
 ```cpp
 jobSystem.ParallelFor(fooView, [](auto& view, auto entity)
 {
@@ -199,7 +259,10 @@ jobSystem.ParallelFor(fooView, [](auto& view, auto entity)
 });
 ```
 
-This enables parallel entity processing with minimal changes to existing ECS code.
+The structure of the ECS update remains familiar. The main difference is that iteration is now executed in parallel, with chunking and scheduling handled by the job system.
+
+This design choice was intentional. By keeping the API close to standard ECS iteration patterns, the job system can be introduced gradually without requiring large refactors or deep multithreading knowledge from the user.
+
 
 ---
 
@@ -231,7 +294,7 @@ In practice, this approach trades some ease of use for:
 
 ### Demo & Stress Testing
 
-To evaluate the job system under realistic conditions, I built a **Total War–style simulation** featuring thousands to over a million entities executing mixed workloads. These workloads included movement updates, formation logic, and behavior processing—all with uneven execution times.
+To evaluate the job system under realistic conditions, I built a **Total War–style simulation** featuring thousands to over a million entities executing mixed workloads. These workloads included movement updates, formation logic, and behavior processing all with uneven execution times.
 
 This setup was intentionally chosen to stress:
 - Load balancing across worker threads
@@ -258,13 +321,16 @@ These observations reinforced a recurring theme: in multithreaded systems, *more
 
 ### Trade-offs
 
-Design choices included:
+Designing a job system involves a series of trade-offs, and this project is no exception.
 
-* Explicit dependency management instead of automatic safety
-* Manual synchronization boundaries
-* Minimal abstraction to avoid hidden costs
+One major choice was favoring **explicit dependency management** over automatic safety. The system does not try to infer which jobs are safe to run in parallel. Instead, the user must define dependencies manually. This increases responsibility for the programmer, but avoids hidden synchronization and unpredictable stalls.
 
-These favor performance and predictability over convenience.
+Another trade-off is the use of **explicit synchronization boundaries**. Calls like `WaitAll()` must be placed deliberately. This can be error-prone if misused, but it makes execution order and performance costs visible, which is valuable in engine-level code.
+
+Finally, the system intentionally avoids heavy abstraction. While higher-level abstractions can make APIs easier to use, they often hide costs and make profiling more difficult. In this project, clarity and predictability were prioritized over maximum convenience.
+
+These choices make the system less forgiving, but they align well with the goal of understanding and controlling performance characteristics.
+
 
 ---
 
