@@ -1,6 +1,6 @@
 theme: jekyll-theme-midnight
-title: My Dev Blog
-description: Engine programming + performance notes
+title: "Building a Fast Job System with ECS Integration"
+description: "How I designed and implemented a multithreaded job system that scales with large workloads and integrates cleanly with ECS."
 
 show_downloads: false
 future: true
