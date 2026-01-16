@@ -346,6 +346,7 @@ This project significantly deepened my understanding of multithreaded systems an
 Working on a job system also pushed me to think more critically about trade-offs. Decisions around synchronization, scheduling, and task granularity all come with costs, affecting performance, complexity, and usability in different ways. Understanding these consequences became just as important as making the system function correctly.
 
 One key insight was that larger workloads often perform better. When enough work is available, worker threads stay busy and synchronization overhead is amortized, whereas very small workloads tend to suffer from idle time and overhead.
+
 ---
 
 ### Future Work
