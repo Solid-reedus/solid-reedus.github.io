@@ -1,5 +1,6 @@
 ---
 layout: post
+theme: jekyll-theme-midnight
 title: "Building a Fast Job System with ECS Integration"
 date: 2026-01-16
 description: "How I designed and implemented a multithreaded job system that scales with large workloads and integrates cleanly with ECS."
