@@ -295,27 +295,113 @@ In practice, this approach trades some ease of use for:
 
 ### Demo & Stress Testing
 
-To evaluate the job system under realistic conditions, I built a **Total War–style simulation** featuring thousands to over a million entities executing mixed workloads. These workloads included movement updates, formation logic, and behavior processing all with uneven execution times.
+To evaluate the job system under realistic conditions, I built a **Total War–style simulation** that runs large numbers of ECS entities under mixed workloads. Units perform formation movement, combat logic, and fleeing behavior, all of which have different execution costs and change dynamically over time.
 
-This setup was intentionally chosen to stress:
-- Load balancing across worker threads
-- Dependency resolution under pressure
-- Scalability as entity count increases
+This setup was chosen deliberately. RTS-style simulations produce uneven workloads where some updates are cheap and others are expensive, which makes them a good stress test for scheduling, load balancing, and synchronization behavior.
 
-[insert demo video here]
+The experiments below focus on three core questions:
+- How stable are frame times under load?
+- How large is the performance difference between sequential and parallel execution?
+- How well does the system scale as workload size increases?
 
-During profiling, several important behaviors emerged.
+---
 
-First, **frame times remained stable** as entity counts increased. While total CPU usage rose—as expected—the cost per entity decreased due to improved parallel efficiency.
+#### Control Group: Job System at Low Load
+In this video, the simulation runs **4 formations**, each with **8 × 40 units**. Only the job system version is active.
 
-Second, the system achieved **up to a 16× speedup** compared to equivalent synchronous execution. Interestingly, the largest gains appeared at higher workloads, where workers remained busy without frequently synchronizing.
 
-Profiling also directly influenced design decisions:
-- An early global job queue caused noticeable contention under stress → replaced with per-worker queues
-- Very small chunk sizes increased scheduling overhead → chunk sizes were tuned empirically
-- Larger batches improved cache locality and reduced atomic pressure
+<video controls width="100%">
+  <source src="/media/job_system_control_group_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
-These observations reinforced a recurring theme: in multithreaded systems, *more work can sometimes mean better performance*, as overheads are amortized and workers remain productive.
+
+
+Key observations:
+- `UpdateUnitsParallel` takes **~1.6 ms on average**
+- The simulation runs at around **110 FPS**
+- When units enter combat, FPS increases to **~130 FPS**
+
+The FPS increase during combat is intentional and important. Combat logic is more varied but also better distributed across workers, resulting in higher parallel efficiency. This confirms that the job system handles mixed workloads well, not just uniform update loops.
+
+---
+
+#### Sequential vs Parallel Comparison
+To directly compare execution models, I recorded a side-by-side profiler comparison showing both versions running the same workload.
+
+
+<video controls width="100%">
+  <source src="/media/job_system_comparison_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+
+
+In the profiler timeline:
+- **Blue bars** represent the single-threaded version
+- **Orange bars** represent the job system version
+
+The difference is immediately visible:
+- The parallel version is significantly faster
+- Frame times are much more stable
+- Spikes present in the single-threaded version are largely eliminated
+
+On average, the job system version runs **~16× faster** than the synchronous version for this workload.
+
+---
+
+#### Profiler-Only Comparison
+To make the performance difference easier to read, the same test was recorded again using only the profiler view.
+
+<video controls width="100%">
+  <source src="/media/job_system_comparison_profiler_only_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+
+
+This view makes it clear that:
+- `UpdateUnits` (sequential) takes roughly **25 ms**
+- `UpdateUnitsParallel` takes around **1.5 ms**
+- Frame-time variance is dramatically reduced in the parallel version
+
+This highlights an important result: the job system not only improves raw performance, but also produces **more consistent frame times**, which is critical for real-time applications.
+
+---
+
+#### High-Load Stress Test
+Finally, the system was tested under a much heavier workload.
+
+<video controls width="100%">
+  <source src="/media/job_system_in_action_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+In this scenario:
+- **14 formations** are active instead of 4
+- `UpdateUnitsParallel` takes **~18–20 ms**
+- The simulation runs at around **35 FPS**
+- FPS increases to **~40 FPS during combat**
+
+Despite the significantly higher workload, the system continues to scale in a predictable way. Performance degrades gradually rather than collapsing, and frame times remain relatively stable even as work increases.
+
+---
+
+#### Observations and Design Impact
+
+These tests revealed several important behaviors that directly influenced the system’s design:
+
+- A **global job queue** caused noticeable contention under stress and was replaced with per-worker queues
+- Very small chunk sizes increased scheduling overhead and reduced throughput
+- Larger chunks improved cache locality and reduced atomic pressure
+- Mixed workloads scale well as long as jobs remain stealable and evenly distributed
+
+A recurring insight throughout testing was that **larger workloads often perform better**, not worse. When enough work is available, worker threads stay busy and synchronization costs are amortized more effectively.
+
+Overall, these stress tests demonstrate that the job system:
+- Scales well with increasing workload size
+- Handles mixed workloads without degrading frame stability
+- Provides large and measurable performance improvements over sequential execution
 
 
 ---
